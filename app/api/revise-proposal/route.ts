@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import fs from "node:fs/promises";
-import path from "node:path";
+import { getStorage, slugify } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -9,19 +8,6 @@ export const maxDuration = 300;
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-5-20250929";
 
-function slugify(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 60) || "unnamed-client"
-  );
-}
-
-/**
- * Same logo-safety pass used in generate-proposal.
- */
 function guardLogoIncludes(latex: string, clientName: string): string {
   const re = /\\includegraphics(\[[^\]]*\])?\{([^}]*?(vizuara_logo|client_logo)[^}]*)\}/g;
   return latex.replace(re, (_match, opts = "", filename: string) => {
@@ -40,17 +26,10 @@ interface ChatTurn {
   content: string;
 }
 
-function buildRevisionPrompt(
-  currentLatex: string,
-  history: ChatTurn[],
-  instruction: string
-) {
+function buildRevisionPrompt(currentLatex: string, history: ChatTurn[], instruction: string) {
   const convo = history.length
-    ? history
-        .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
-        .join("\n")
+    ? history.map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`).join("\n")
     : "(no prior turns)";
-
   return `You are editing a corporate training proposal for Vizuara Technologies. The document is a LaTeX file. The user is iterating on it and just gave you a new instruction.
 
 ## Current LaTeX source
@@ -92,30 +71,21 @@ Rules:
 export async function POST(req: NextRequest) {
   try {
     const { clientName, instruction, history } = await req.json();
-    if (!clientName) {
-      return NextResponse.json({ error: "clientName required" }, { status: 400 });
-    }
-    if (!instruction || !String(instruction).trim()) {
+    if (!clientName) return NextResponse.json({ error: "clientName required" }, { status: 400 });
+    if (!instruction?.toString().trim())
       return NextResponse.json({ error: "instruction required" }, { status: 400 });
-    }
 
     const slug = slugify(clientName);
-    const outputDir = process.env.PROPOSAL_OUTPUT_DIR || "/Users/raj/Desktop/Proposal Agent/output";
-    const clientDir = path.join(outputDir, slug);
-    const texPath = path.join(clientDir, "proposal.tex");
-
-    let currentLatex: string;
-    try {
-      currentLatex = await fs.readFile(texPath, "utf-8");
-    } catch {
+    const store = getStorage();
+    if (!(await store.exists(`${slug}/proposal.tex`))) {
       return NextResponse.json(
         { error: `proposal.tex not found — generate the first draft before revising.` },
         { status: 400 }
       );
     }
+    const currentLatex = await store.getText(`${slug}/proposal.tex`);
 
     const prompt = buildRevisionPrompt(currentLatex, history ?? [], String(instruction));
-
     const resp = await client.messages.create({
       model: MODEL,
       max_tokens: 16000,
@@ -127,13 +97,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No text response" }, { status: 500 });
     }
     const raw = textBlock.text;
-
     const summaryMatch = raw.match(/<summary>([\s\S]*?)<\/summary>/);
     const latexMatch = raw.match(/<latex>([\s\S]*?)<\/latex>/);
-    const fallbackLatex = latexMatch
-      ? latexMatch[1]
-      : raw.slice(raw.indexOf("\\documentclass"));
-
+    const fallbackLatex = latexMatch ? latexMatch[1] : raw.slice(raw.indexOf("\\documentclass"));
     if (!fallbackLatex || !fallbackLatex.includes("\\documentclass")) {
       return NextResponse.json(
         { error: "Claude did not return valid LaTeX", raw: raw.slice(0, 500) },
@@ -144,24 +110,20 @@ export async function POST(req: NextRequest) {
     const newLatex = guardLogoIncludes(fallbackLatex.trim(), clientName);
     const summary = summaryMatch?.[1]?.trim() || "Updated the proposal.";
 
-    // Back up previous version for undo (last-revision only).
+    // Back up the previous tex for one-step undo
     try {
-      await fs.copyFile(texPath, path.join(clientDir, "proposal.prev.tex"));
+      await store.copy(`${slug}/proposal.tex`, `${slug}/proposal.prev.tex`);
     } catch {}
-
-    await fs.writeFile(texPath, newLatex, "utf-8");
+    await store.put(`${slug}/proposal.tex`, newLatex, "text/x-tex");
 
     return NextResponse.json({
       ok: true,
       summary,
       clientSlug: slug,
-      texPath,
+      texKey: `${slug}/proposal.tex`,
     });
   } catch (err: any) {
     console.error("revise-proposal error:", err);
-    return NextResponse.json(
-      { error: err?.message ?? "revision failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message ?? "revision failed" }, { status: 500 });
   }
 }

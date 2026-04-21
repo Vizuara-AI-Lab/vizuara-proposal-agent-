@@ -1,22 +1,8 @@
 import { NextRequest } from "next/server";
-import fs from "node:fs/promises";
-import path from "node:path";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
-function slugify(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 60) || "unnamed-client"
-  );
-}
-
-/**
- * Encode a string as quoted-printable (RFC 2045) for 8-bit safe email bodies.
- */
 function quotedPrintable(input: string): string {
   const bytes = Buffer.from(input, "utf-8");
   let out = "";
@@ -47,7 +33,6 @@ function quotedPrintable(input: string): string {
 }
 
 function foldHeader(name: string, value: string): string {
-  // Simple header folding at ~72 chars
   const line = `${name}: ${value}`;
   if (line.length <= 78) return line;
   const words = value.split(" ");
@@ -66,7 +51,6 @@ function foldHeader(name: string, value: string): string {
 }
 
 function encodeHeaderWord(s: string): string {
-  // MIME Encoded-Word if non-ASCII
   if (/^[\x20-\x7e]*$/.test(s)) return s;
   return `=?UTF-8?B?${Buffer.from(s, "utf-8").toString("base64")}?=`;
 }
@@ -77,10 +61,6 @@ function chunkBase64(b64: string, width = 76): string {
   return out.join("\r\n");
 }
 
-/**
- * GET /api/compose-eml?slug=...&to=...&from=...&subject=...&body=...&filename=...
- * Streams a .eml file with the proposal PDF attached.
- */
 export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const slug = sp.get("slug");
@@ -91,14 +71,12 @@ export async function GET(req: NextRequest) {
   const from = sp.get("from") || "hello@vizuara.com";
   const subject = sp.get("subject") || "Proposal from Vizuara Technologies";
   const body = sp.get("body") || "";
-  const clientName = sp.get("clientName") || slug;
   const attachName = sp.get("filename") || `${slug}-proposal.pdf`;
 
-  const outputDir = process.env.PROPOSAL_OUTPUT_DIR || "/Users/raj/Desktop/Proposal Agent/output";
-  const pdfPath = path.join(outputDir, slug, "proposal.pdf");
+  const store = getStorage();
   let pdf: Buffer;
   try {
-    pdf = await fs.readFile(pdfPath);
+    pdf = await store.get(`${slug}/proposal.pdf`);
   } catch {
     return new Response("proposal.pdf not found — compile it first.", { status: 404 });
   }
@@ -137,7 +115,6 @@ export async function GET(req: NextRequest) {
   ].join("\r\n");
 
   const eml = [headers, "", bodyPart, pdfPart, `--${boundary}--`, ""].join("\r\n");
-
   const fileNameOut = `${slug}-${Date.now()}.eml`;
   return new Response(eml, {
     headers: {

@@ -5,7 +5,7 @@ import { FIELDS, GROUP_ORDER, GROUP_LABELS } from "@/lib/fields";
 interface Props {
   values: Record<string, string>;
   notes: string[];
-  savedInfo: { clientSlug: string; outputDir: string; briefPath: string; markdownPath: string };
+  savedInfo: { clientSlug: string; briefKey: string; markdownKey: string };
   onContinue: () => void;
   onBack: () => void;
 }
@@ -64,7 +64,7 @@ export default function Brief({ values, notes, savedInfo, onContinue, onBack }: 
             Brief summary
           </h2>
           <div className="text-[11px] text-gray-400 font-mono">
-            {savedInfo.outputDir}
+            {savedInfo.clientSlug}
           </div>
         </div>
         <div className="space-y-5">

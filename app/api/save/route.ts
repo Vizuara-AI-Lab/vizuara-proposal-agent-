@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { FIELDS, GROUP_ORDER, GROUP_LABELS } from "@/lib/fields";
+import { getStorage, slugify } from "@/lib/storage";
 
 export const runtime = "nodejs";
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60) || "unnamed-client";
-}
+export const maxDuration = 60;
 
 function renderMarkdownBrief(
   values: Record<string, string>,
@@ -24,7 +16,6 @@ function renderMarkdownBrief(
   lines.push("");
   lines.push(`_Generated from intake UI on ${new Date().toISOString().slice(0, 10)}_`);
   lines.push("");
-
   for (const group of GROUP_ORDER) {
     const fieldsInGroup = FIELDS.filter((f) => f.group === group);
     const anyFilled = fieldsInGroup.some((f) => values[f.id]?.trim());
@@ -38,14 +29,12 @@ function renderMarkdownBrief(
     }
     lines.push("");
   }
-
   if (notes && notes.length) {
     lines.push(`## Additional context from the meeting`);
     lines.push("");
     for (const n of notes) lines.push(`- ${n}`);
     lines.push("");
   }
-
   if (transcript?.trim()) {
     lines.push(`## Raw source (${sourceMode})`);
     lines.push("");
@@ -53,7 +42,6 @@ function renderMarkdownBrief(
     lines.push(transcript);
     lines.push("```");
   }
-
   return lines.join("\n");
 }
 
@@ -64,13 +52,8 @@ export async function POST(req: NextRequest) {
     if (!clientName) {
       return NextResponse.json({ error: "clientName is required" }, { status: 400 });
     }
-
     const slug = slugify(clientName);
-    const outputDir =
-      process.env.PROPOSAL_OUTPUT_DIR ||
-      "/Users/raj/Desktop/Proposal Agent/output";
-    const clientDir = path.join(outputDir, slug);
-    await fs.mkdir(clientDir, { recursive: true });
+    const store = getStorage();
 
     const briefJson = {
       clientSlug: slug,
@@ -81,21 +64,17 @@ export async function POST(req: NextRequest) {
       transcript: transcript ?? "",
     };
 
-    const jsonPath = path.join(clientDir, "brief.json");
-    const mdPath = path.join(clientDir, "brief.md");
-    await fs.writeFile(jsonPath, JSON.stringify(briefJson, null, 2), "utf-8");
-    await fs.writeFile(
-      mdPath,
-      renderMarkdownBrief(values, transcript ?? "", sourceMode ?? "manual", notes ?? []),
-      "utf-8"
+    await store.put(`${slug}/brief.json`, JSON.stringify(briefJson, null, 2));
+    await store.put(
+      `${slug}/brief.md`,
+      renderMarkdownBrief(values, transcript ?? "", sourceMode ?? "manual", notes ?? [])
     );
 
     return NextResponse.json({
       ok: true,
       clientSlug: slug,
-      briefPath: jsonPath,
-      markdownPath: mdPath,
-      outputDir: clientDir,
+      briefKey: `${slug}/brief.json`,
+      markdownKey: `${slug}/brief.md`,
     });
   } catch (err: any) {
     console.error("save error:", err);

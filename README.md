@@ -38,10 +38,10 @@ capabilities:
     outputs: { questions: [{ fieldId: string, question: string, hint?: string }] }
 
   - id: save_brief
-    summary: Persist the brief to disk (brief.json + brief.md) under output/{client-slug}/.
+    summary: Persist the brief (brief.json + brief.md) under {clientSlug}/ in shared storage.
     endpoint: POST /api/save
     inputs: { values: map<field_id,string>, transcript: string, sourceMode: string, notes: string[] }
-    outputs: { ok: bool, clientSlug: string, briefPath: string, markdownPath: string, outputDir: string }
+    outputs: { ok: bool, clientSlug: string, briefKey: string, markdownKey: string }
 
   - id: search_meet_transcripts
     summary: Find Google Meet transcripts in the shared Drive folder matching (clientName, meetingDate).
@@ -60,18 +60,20 @@ capabilities:
   - id: generate_proposal
     summary: >
       Draft the full LaTeX proposal using the brief + style guide + (optional) matched
-      transcript excerpts. Writes proposal.tex to output/{slug}/.
+      transcript excerpts. Writes {slug}/proposal.tex to shared storage.
     endpoint: POST /api/generate-proposal
     inputs: { values: map, notes: string[], transcriptExcerpts?: [{ name: string, text: string }] }
-    outputs: { ok: bool, clientSlug: string, texPath: string, outputDir: string, hasLogos: { vizuara: bool, client: bool } }
+    outputs: { ok: bool, clientSlug: string, texKey: string, hasLogos: { vizuara: bool, client: bool } }
 
   - id: compile_pdf
-    summary: Compile output/{slug}/proposal.tex with pdflatex twice. Returns the PDF path.
+    summary: >
+      Compile {slug}/proposal.tex (pulls any uploaded logos as compile assets)
+      and writes {slug}/proposal.pdf back to shared storage. Dispatches to the
+      configured compile strategy (bundled pdflatex or COMPILE_SERVICE_URL).
     endpoint: POST /api/compile-pdf
     inputs: { clientName: string, texOverride?: string }
-    outputs: { ok: bool, pdfPath: string, sizeBytes: number, clientSlug: string }
+    outputs: { ok: bool, pdfKey: string, sizeBytes: number, clientSlug: string }
     failure_shape: { error: string, stdout?: string, stderr?: string, logTail?: string }
-    requires: pdflatex binary available at PDFLATEX_BIN
 
   - id: revise_proposal
     summary: >
@@ -79,7 +81,7 @@ capabilities:
       Writes the new LaTeX, backs up the previous one to proposal.prev.tex.
     endpoint: POST /api/revise-proposal
     inputs: { clientName: string, instruction: string, history: [{ role: "user"|"assistant", content: string }] }
-    outputs: { ok: bool, summary: string, clientSlug: string, texPath: string }
+    outputs: { ok: bool, summary: string, clientSlug: string, texKey: string }
 
   - id: draft_email
     summary: >
@@ -130,16 +132,28 @@ state_machine:
     - compose_eml                # 10. download .eml with PDF attached
 
 output_contract:
-  # For every client processed, the following files are written to output/{slug}/
-  path_template: "{PROPOSAL_OUTPUT_DIR}/{slug}/"
+  # For every client processed, the following keys are written to shared storage (Supabase bucket or local dev dir).
+  key_template: "{clientSlug}/{filename}"
   files:
     brief.json:     Canonical structured brief (machine-readable).
     brief.md:       Human-readable markdown rendering.
     proposal.tex:   Compilable LaTeX source.
     proposal.pdf:   Final PDF.
     proposal.prev.tex: Backup of the prior revision (undo).
-    vizuara_logo.{png,jpg}: Title-page logo (auto-seeded from PROPOSAL_ASSETS_DIR if present).
+    vizuara_logo.{png,jpg}: Title-page logo (auto-seeded from bundled default if none uploaded).
     client_logo.{png,jpg}: Uploaded via /api/upload-logo.
+
+storage_driver:
+  auto_selection: >
+    If SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set, Supabase is used automatically.
+    Otherwise the app falls back to the local filesystem at PROPOSAL_OUTPUT_DIR (dev only).
+  force_with: PROPOSAL_STORAGE=supabase|local
+
+compile_strategy:
+  auto_selection: >
+    If COMPILE_SERVICE_URL is set, POST tex + assets to that endpoint and expect
+    application/pdf back. Otherwise run pdflatex locally (twice). Deploy via the
+    bundled Dockerfile to get pdflatex inside the container out-of-the-box.
 ```
 
 ---
@@ -190,25 +204,91 @@ Requires:
 
 ---
 
-## 4. Deployment notes for production
+## 4. Production deployment
 
-Vercel serverless functions do **not** ship with `pdflatex`. For
-production you need one of:
+The app is **stateless** — no data is held on the server's local disk in
+production. Every brief, LaTeX source, PDF, and logo is written to
+**Supabase Storage** so the entire team sees the same briefs regardless
+of which instance they hit. LaTeX compilation is pluggable: the shipped
+Dockerfile bakes in `pdflatex` so a single container is all you need.
 
-1. **VM / container** (DigitalOcean droplet, AWS Lightsail, Railway,
-   Fly.io, a docker-compose on your own server): install
-   `texlive-latex-recommended` + `texlive-fonts-recommended`, then deploy
-   as a plain Node.js app.
-2. **Vercel + external compile service**: deploy the Next.js app to
-   Vercel, and move `/api/compile-pdf` to a Vercel Sandbox /
-   separate container that exposes a PDF endpoint. Proxy to it.
-3. **Vercel + client-side .tex download only**: let users download the
-   `.tex` and compile it themselves on Overleaf. (Lowest-effort, worst
-   UX.)
+### Prerequisites (one-time)
 
-All other routes (extract, probe, generate, revise, draft-email,
-compose-eml, drive-search) are pure Node code and work on Vercel
-serverless unchanged.
+1. **Supabase bucket** — Create a private bucket named `proposals` in
+   your Supabase project's Storage dashboard. Grab the `SUPABASE_URL`
+   and `SUPABASE_SERVICE_ROLE_KEY` from Project Settings → API.
+2. **Anthropic key** with sufficient rate limit for Sonnet 4.5.
+3. **Google service account** (optional) with Viewer access on the
+   shared Meet-transcripts Drive folder, if you want transcript
+   auto-matching.
+
+### Recipe 1 — Docker (recommended, one container does everything)
+
+Any Docker host works: Fly.io, Railway, Render, DigitalOcean App
+Platform, Cloud Run, your own VPS, docker-compose.
+
+```bash
+docker build -t vizuara-proposal-agent .
+docker run -p 3210:3210 \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e SUPABASE_URL=https://...supabase.co \
+  -e SUPABASE_SERVICE_ROLE_KEY=eyJ... \
+  -e SUPABASE_BUCKET=proposals \
+  -e MEET_TRANSCRIPTS_FOLDER_ID=... \
+  -e GOOGLE_SERVICE_ACCOUNT_KEY='{...}' \
+  vizuara-proposal-agent
+```
+
+The image is based on `node:20-bookworm-slim` + TeX Live basic +
+extras. It's ~1.2 GB.
+
+**Fly.io one-liner**: `fly launch --dockerfile Dockerfile` — the Fly
+CLI picks up the bundled Dockerfile, provisions a machine, and asks for
+env vars.
+
+**Railway / Render**: point them at the repo, they auto-detect the
+Dockerfile.
+
+### Recipe 2 — Vercel + external compile service
+
+If you want the Next.js app on Vercel (fast cold starts, edge CDN), you
+still need `pdflatex` running somewhere — Vercel Functions don't ship
+with it. Deploy a tiny LaTeX-compile container alongside.
+
+1. Deploy this repo on Vercel. Set env vars:
+   - `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+   - `COMPILE_SERVICE_URL=https://your-compile.example.com/compile`
+   - `COMPILE_SERVICE_TOKEN=<optional>`
+
+2. Deploy a compile service (there are several open-source ones, or
+   write a 20-line Go/Node server that accepts
+   `POST { tex, assets: {name: base64, ...} }` and returns
+   `application/pdf`). See `lib/compile.ts` for the exact contract.
+
+All non-compile routes work on Vercel serverless with no changes.
+
+### Recipe 3 — Local dev
+
+```bash
+cp .env.example .env.local        # fill in ANTHROPIC_API_KEY
+# leave SUPABASE_* unset → local filesystem mode
+# install TeX Live: brew install --cask basictex
+npm install
+npm run dev                       # http://localhost:3210
+```
+
+Files land in `./.proposal-output/{slug}/`.
+
+### What changes between dev and prod
+
+| Concern | Dev (local) | Prod (Docker/Vercel) |
+|---|---|---|
+| Storage | `.proposal-output/` dir | Supabase bucket |
+| Compile | Local `pdflatex` binary | Bundled in container (or `COMPILE_SERVICE_URL`) |
+| Style guide | Bundled `style.md` | Bundled `style.md` |
+| Default Vizuara logo | Bundled `public/vizuara_logo.png` | Same |
+
+No code path relies on `/Users/raj/…` or any other absolute local path.
 
 ---
 

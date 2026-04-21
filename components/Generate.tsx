@@ -485,7 +485,7 @@ export default function Generate({ values, notes, clientSlug, onBack, onRestart 
                 Proposal preview
               </div>
               <div className="text-[13px] text-gray-500 mt-0.5">
-                output/{clientSlug}/proposal.pdf
+                {clientSlug}/proposal.pdf
               </div>
             </div>
             <div className="flex items-center gap-3">

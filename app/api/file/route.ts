@@ -1,20 +1,16 @@
 import { NextRequest } from "next/server";
-import fs from "node:fs/promises";
 import path from "node:path";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
-/**
- * GET /api/file?slug=<client-slug>&name=<file>
- * Serves proposal.pdf / proposal.tex / brief.json from the client's output folder.
- * Restricted to an allow-list of filenames.
- */
 const ALLOW = new Set([
   "proposal.pdf",
   "proposal.tex",
   "brief.json",
   "brief.md",
   "vizuara_logo.png",
+  "vizuara_logo.jpg",
   "client_logo.png",
   "client_logo.jpg",
   "client_logo.jpeg",
@@ -38,12 +34,12 @@ export async function GET(req: NextRequest) {
   if (slug.includes("/") || slug.includes("..")) {
     return new Response("bad slug", { status: 400 });
   }
-  const outputDir = process.env.PROPOSAL_OUTPUT_DIR || "/Users/raj/Desktop/Proposal Agent/output";
-  const file = path.join(outputDir, slug, name);
+
   try {
-    const data = await fs.readFile(file);
+    const store = getStorage();
+    const data = await store.get(`${slug}/${name}`);
     const mime = MIME[path.extname(name).toLowerCase()] || "application/octet-stream";
-    return new Response(data, {
+    return new Response(new Uint8Array(data), {
       headers: {
         "content-type": mime,
         "content-disposition": `inline; filename="${name}"`,

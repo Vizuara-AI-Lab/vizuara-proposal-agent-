@@ -1,24 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import path from "node:path";
-import fs from "node:fs/promises";
-
-const execFileP = promisify(execFile);
+import { getStorage, slugify } from "@/lib/storage";
+import { compileLatex, CompileFailed } from "@/lib/compile";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-function slugify(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 60) || "unnamed-client"
-  );
-}
-
+/**
+ * POST { clientName, texOverride? }
+ * - Reads proposal.tex from storage (or takes an override).
+ * - Pulls any uploaded logos from storage as compile assets.
+ * - Compiles via the configured strategy (local pdflatex or COMPILE_SERVICE_URL).
+ * - Writes proposal.pdf back to storage.
+ */
 export async function POST(req: NextRequest) {
   try {
     const { clientName, texOverride } = await req.json();
@@ -26,80 +19,52 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "clientName required" }, { status: 400 });
     }
     const slug = slugify(clientName);
-    const outputDir = process.env.PROPOSAL_OUTPUT_DIR || "/Users/raj/Desktop/Proposal Agent/output";
-    const clientDir = path.join(outputDir, slug);
-    const texPath = path.join(clientDir, "proposal.tex");
+    const store = getStorage();
 
+    let tex: string;
     if (texOverride) {
-      await fs.writeFile(texPath, texOverride, "utf-8");
-    }
-
-    // Verify tex exists
-    try {
-      await fs.access(texPath);
-    } catch {
+      tex = String(texOverride);
+      await store.put(`${slug}/proposal.tex`, tex, "text/x-tex");
+    } else if (await store.exists(`${slug}/proposal.tex`)) {
+      tex = await store.getText(`${slug}/proposal.tex`);
+    } else {
       return NextResponse.json(
-        { error: `proposal.tex not found at ${texPath} — generate first.` },
+        { error: `proposal.tex not found for ${slug} — generate first.` },
         { status: 400 }
       );
     }
 
-    const pdflatex = process.env.PDFLATEX_BIN || "pdflatex";
-    const args = ["-interaction=nonstopmode", "-halt-on-error", "proposal.tex"];
+    // Gather logo assets from storage
+    const assets: Record<string, Buffer> = {};
+    for (const name of ["vizuara_logo.png", "vizuara_logo.jpg", "client_logo.png", "client_logo.jpg"]) {
+      if (await store.exists(`${slug}/${name}`)) {
+        assets[name] = await store.get(`${slug}/${name}`);
+      }
+    }
 
-    let lastStdout = "";
-    let lastStderr = "";
-    for (let i = 0; i < 2; i++) {
-      try {
-        const { stdout, stderr } = await execFileP(pdflatex, args, {
-          cwd: clientDir,
-          maxBuffer: 20 * 1024 * 1024,
-        });
-        lastStdout = stdout;
-        lastStderr = stderr;
-      } catch (e: any) {
-        // Collect log for error reporting
-        let log = "";
-        try {
-          log = await fs.readFile(path.join(clientDir, "proposal.log"), "utf-8");
-        } catch {}
+    try {
+      const { pdf } = await compileLatex(tex, assets);
+      await store.put(`${slug}/proposal.pdf`, pdf, "application/pdf");
+      return NextResponse.json({
+        ok: true,
+        clientSlug: slug,
+        pdfKey: `${slug}/proposal.pdf`,
+        sizeBytes: pdf.length,
+      });
+    } catch (e) {
+      if (e instanceof CompileFailed) {
         return NextResponse.json(
           {
-            error: "pdflatex failed",
-            stderr: e?.stderr?.slice(-4000) ?? String(e).slice(0, 4000),
-            stdout: e?.stdout?.slice(-4000),
-            logTail: log.slice(-4000),
+            error: e.details.message,
+            logTail: e.details.logTail,
+            stderr: e.details.stderr,
+            stdout: e.details.stdout,
           },
           { status: 500 }
         );
       }
+      throw e;
     }
-
-    // Verify PDF exists
-    const pdfPath = path.join(clientDir, "proposal.pdf");
-    try {
-      await fs.access(pdfPath);
-    } catch {
-      return NextResponse.json(
-        { error: "pdflatex ran but no PDF produced", stdoutTail: lastStdout.slice(-2000) },
-        { status: 500 }
-      );
-    }
-
-    // Clean auxiliary files
-    for (const ext of [".aux", ".log", ".out", ".fls", ".fdb_latexmk", ".toc"]) {
-      try {
-        await fs.unlink(path.join(clientDir, `proposal${ext}`));
-      } catch {}
-    }
-
-    const stat = await fs.stat(pdfPath);
-    return NextResponse.json({
-      ok: true,
-      pdfPath,
-      sizeBytes: stat.size,
-      clientSlug: slug,
-    });
   } catch (err: any) {
     console.error("compile-pdf error:", err);
     return NextResponse.json({ error: err?.message ?? "compile failed" }, { status: 500 });

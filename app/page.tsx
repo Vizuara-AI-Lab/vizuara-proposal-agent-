@@ -23,9 +23,8 @@ export default function Page() {
   const [notes, setNotes] = useState<string[]>([]);
   const [savedInfo, setSavedInfo] = useState<{
     clientSlug: string;
-    outputDir: string;
-    briefPath: string;
-    markdownPath: string;
+    briefKey: string;
+    markdownKey: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
 

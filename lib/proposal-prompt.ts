@@ -1,13 +1,8 @@
-import fs from "node:fs/promises";
 import { FIELDS, GROUP_LABELS, GROUP_ORDER } from "./fields";
+import { loadBundledStyleGuide } from "./bundled-assets";
 
 export async function loadStyleGuide(): Promise<string> {
-  const p = process.env.PROPOSAL_STYLE_GUIDE || "/Users/raj/Desktop/Proposal Agent/style.md";
-  try {
-    return await fs.readFile(p, "utf-8");
-  } catch {
-    return "";
-  }
+  return loadBundledStyleGuide();
 }
 
 function renderBriefForPrompt(values: Record<string, string>, notes: string[]) {
